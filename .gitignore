@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 *.pem
 build/https/
+release/
+build/
+electron/dist/
