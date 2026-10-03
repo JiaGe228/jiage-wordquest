@@ -1,6 +1,6 @@
 // 「迦哥闯天下」离线缓存服务
 // 策略：同源 GET 一律缓存优先，首次联网访问后整站可用，导航请求兜底回 index.html
-const VERSION = 'jiage-v26'
+const VERSION = 'jiage-v27'
 const PRECACHE = ['./', './index.html', './start.html', './manifest.webmanifest', './icon-192-v12.png', './icon-512-v12.png', './apple-touch-icon-v12.png', './apple-touch-icon.png', './apple-touch-icon-precomposed.png']
 
 self.addEventListener('install', (event) => {
