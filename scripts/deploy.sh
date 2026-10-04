@@ -15,7 +15,7 @@ rm -rf docs
 cp -R dist docs
 
 echo "==> 提交并推送..."
-git add docs
+git add -A
 if git diff --cached --quiet; then
   echo "没有变化，无需部署。"
 else

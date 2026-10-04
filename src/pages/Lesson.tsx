@@ -9,10 +9,49 @@ import { speak } from '@/lib/speech'
 import { sfx } from '@/lib/sfx'
 import { recordPcm, scoreSpeak, ensureMic, type SpeakResult } from '@/lib/speakcheck'
 import { SpeakerButton, Confetti } from '@/components/common'
+import { HINT_FIFTY_PRICE, HINT_LETTER_PRICE, HEART_REFILL_PRICE } from '@/lib/shop'
 
 type Phase = 'question' | 'feedback' | 'done' | 'failed'
 
 const HEARTS_MAX = 5
+
+// ---------- 关卡内进度自动存档：中途退出后可继续 ----------
+const LESSON_SAVE_KEY = 'wordquest-lesson-progress-v1'
+
+interface LessonSave {
+  levelKey: string
+  qIndex: number
+  hearts: number
+  results: { wordId: string; correct: boolean }[]
+}
+
+function loadLessonSave(levelKey: string): LessonSave | null {
+  try {
+    const raw = localStorage.getItem(LESSON_SAVE_KEY)
+    if (!raw) return null
+    const s = JSON.parse(raw) as LessonSave
+    if (s.levelKey !== levelKey || !Array.isArray(s.results) || s.results.length === 0) return null
+    return s
+  } catch {
+    return null
+  }
+}
+
+function persistLessonSave(s: LessonSave) {
+  try {
+    localStorage.setItem(LESSON_SAVE_KEY, JSON.stringify(s))
+  } catch {
+    // 存储失败不阻塞游戏
+  }
+}
+
+function clearLessonSave() {
+  try {
+    localStorage.removeItem(LESSON_SAVE_KEY)
+  } catch {
+    // ignore
+  }
+}
 
 function OptionButton({
   label,
@@ -39,7 +78,7 @@ function OptionButton({
   return (
     <button
       onClick={onClick}
-      disabled={state === 'correct' || state === 'wrong'}
+      disabled={state === 'correct' || state === 'wrong' || state === 'dim'}
       className={`w-full rounded-2xl border-2 font-extrabold shadow-sm transition ${base} ${styles[state]}`}
     >
       {label}
@@ -50,7 +89,7 @@ function OptionButton({
 export default function Lesson() {
   const { unitIndex = '0', levelIndex = '0' } = useParams()
   const navigate = useNavigate()
-  const { completeLesson, state: saveState } = useGame()
+  const { completeLesson, state: saveState, spendGems } = useGame()
 
   const ui = Number(unitIndex)
   const li = Number(levelIndex)
@@ -62,15 +101,29 @@ export default function Lesson() {
     [unit, li]
   )
 
-  const [qIndex, setQIndex] = useState(0)
+  // 恢复上次进度（如果有有效存档）
+  const [savedProgress] = useState(() => {
+    if (!unit) return null
+    const s = loadLessonSave(`${unit.id}-L${li}`)
+    return s && s.qIndex < questions.length ? s : null
+  })
+  const [resume, setResume] = useState<'ask' | 'done'>(
+    savedProgress && savedProgress.results.length > 0 ? 'ask' : 'done'
+  )
+
+  const [qIndex, setQIndex] = useState(savedProgress?.qIndex ?? 0)
   const [phase, setPhase] = useState<Phase>('question')
   const [selected, setSelected] = useState<string | null>(null)
   const [spelled, setSpelled] = useState<number[]>([])
-  const [hearts, setHearts] = useState(HEARTS_MAX)
-  const [results, setResults] = useState<{ wordId: string; correct: boolean }[]>([])
+  const [hearts, setHearts] = useState(savedProgress?.hearts ?? HEARTS_MAX)
+  const [results, setResults] = useState<{ wordId: string; correct: boolean }[]>(savedProgress?.results ?? [])
   const [showExit, setShowExit] = useState(false)
   const [speakState, setSpeakState] = useState<'idle' | 'recording' | 'analyzing' | 'scored'>('idle')
   const [speakResult, setSpeakResult] = useState<SpeakResult | null>(null)
+  // 提示道具状态
+  const [eliminated, setEliminated] = useState<string[]>([])
+  const [letterHintUsed, setLetterHintUsed] = useState(false)
+  const [hintAsk, setHintAsk] = useState<'fifty' | 'letter' | null>(null)
   const summary = useRef<{ xpEarned: number; gemsEarned: number; correct: number; total: number } | null>(null)
 
   const q: Question | undefined = questions[qIndex]
@@ -83,6 +136,18 @@ export default function Lesson() {
       return () => clearTimeout(t)
     }
   }, [q])
+
+  // 每答完一题自动存档；通关/失败后清除
+  useEffect(() => {
+    if (!unit) return
+    if (phase === 'done' || phase === 'failed') {
+      clearLessonSave()
+      return
+    }
+    if (results.length > 0) {
+      persistLessonSave({ levelKey: `${unit.id}-L${li}`, qIndex, hearts, results })
+    }
+  }, [qIndex, hearts, results, phase, unit, li])
 
   if (!unit || !q) {
     return (
@@ -122,7 +187,7 @@ export default function Lesson() {
 
   function goNext() {
     if (qIndex + 1 >= questions.length) {
-      summary.current = completeLesson(levelKey, results)
+      summary.current = completeLesson(levelKey, results, isBoss ? 2 : 1)
       sfx.complete()
       setPhase('done')
     } else {
@@ -131,6 +196,9 @@ export default function Lesson() {
       setSpelled([])
       setSpeakState('idle')
       setSpeakResult(null)
+      setEliminated([])
+      setLetterHintUsed(false)
+      setHintAsk(null)
       setPhase('question')
     }
   }
@@ -145,6 +213,8 @@ export default function Lesson() {
   }
 
   function restart() {
+    clearLessonSave()
+    setResume('done')
     setQIndex(0)
     setPhase('question')
     setSelected(null)
@@ -153,7 +223,45 @@ export default function Lesson() {
     setResults([])
     setSpeakState('idle')
     setSpeakResult(null)
+    setEliminated([])
+    setLetterHintUsed(false)
+    setHintAsk(null)
     summary.current = null
+  }
+
+  /** 提示道具：去两错 / 拼写首字母，花宝石购买 */
+  function confirmHint(kind: 'fifty' | 'letter') {
+    const price = kind === 'fifty' ? HINT_FIFTY_PRICE : HINT_LETTER_PRICE
+    if (!spendGems(price)) {
+      sfx.wrong()
+      setHintAsk(null)
+      return
+    }
+    sfx.complete()
+    if (kind === 'fifty' && q && q.options.length > 0) {
+      const wrong = q.options
+        .filter((o) => o !== q.correct)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 2)
+      setEliminated(wrong)
+    }
+    if (kind === 'letter' && q && q.type === 'spelling') {
+      const idx = q.letters!.findIndex((ch, i) => ch === q.correct[0] && !spelled.includes(i))
+      if (idx >= 0) setSpelled((prev) => [...prev, idx])
+      setLetterHintUsed(true)
+    }
+    setHintAsk(null)
+  }
+
+  /** 爱心补给：失败界面花宝石满血复活，保留本关进度 */
+  function refillHearts() {
+    if (!spendGems(HEART_REFILL_PRICE)) {
+      sfx.wrong()
+      return
+    }
+    sfx.complete()
+    setHearts(HEARTS_MAX)
+    setPhase('question')
   }
 
   /** 跟读：录音 → 评分（联网走语音识别比对，离线走音频特征启发式） */
@@ -189,6 +297,37 @@ export default function Lesson() {
 
   const answered = phase === 'feedback'
   const canCheck = q.type === 'spelling' ? spelled.length === q.correct.length : selected !== null
+  const isBoss = li === LEVELS_PER_UNIT - 1
+
+  /** 提示道具按钮 / 二次确认条 */
+  function hintControl(kind: 'fifty' | 'letter', label: string, price: number) {
+    if (hintAsk === kind) {
+      return (
+        <div className="mx-auto mb-3 flex w-full max-w-md items-center gap-2 rounded-2xl bg-[#fff4d6] p-3 ring-2 ring-[#ffc800]/50">
+          <span className="flex-1 text-sm font-black text-slate-600">
+            花 {price} 宝石{label}？
+          </span>
+          <button
+            onClick={() => confirmHint(kind)}
+            className="rounded-xl bg-[#58cc02] px-4 py-2 text-sm font-black text-white shadow-[0_3px_0_#46a302]"
+          >
+            确定
+          </button>
+          <button onClick={() => setHintAsk(null)} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-black text-slate-500">
+            取消
+          </button>
+        </div>
+      )
+    }
+    return (
+      <button
+        onClick={() => setHintAsk(kind)}
+        className="mx-auto mb-3 flex items-center gap-1.5 rounded-full bg-[#fff4d6] px-4 py-2 text-sm font-black text-[#b8860b] ring-2 ring-[#ffc800]/50 transition hover:bg-[#ffe9a8]"
+      >
+        💡 {label} · {price}💎
+      </button>
+    )
+  }
 
   const praise = ['太棒了！', '你真厉害！', '好样的！', '答对啦！', '完美！']
   const praiseText = praise[(qIndex + q.word.word.length) % praise.length]
@@ -202,7 +341,7 @@ export default function Lesson() {
           <div className="w-full max-w-sm rounded-3xl bg-white p-6 text-center shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 text-5xl">🦉</div>
             <h3 className="mb-1 text-xl font-black text-slate-800">现在离开吗？</h3>
-            <p className="mb-5 text-sm font-bold text-slate-400">本关进度不会被保存哦</p>
+            <p className="mb-5 text-sm font-bold text-slate-400">放心，进度已自动保存，回来可以继续</p>
             <div className="flex gap-3">
               <button
                 onClick={() => navigate('/')}
@@ -215,6 +354,36 @@ export default function Lesson() {
                 className="flex-1 rounded-2xl bg-slate-100 py-3 font-black text-slate-500"
               >
                 继续学习
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 恢复上次进度 */}
+      {resume === 'ask' && savedProgress && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#131f24]/60 p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 text-center shadow-2xl">
+            <div className="mb-2 text-5xl">📍</div>
+            <h3 className="mb-1 text-xl font-black text-slate-800">接着上次继续！</h3>
+            <p className="mb-5 text-sm font-bold text-slate-400">
+              这关已经做到第 {Math.min(savedProgress.qIndex + 1, questions.length)}/{questions.length} 题
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={restart}
+                className="flex-1 rounded-2xl bg-slate-100 py-3 font-black text-slate-500"
+              >
+                重新开始
+              </button>
+              <button
+                onClick={() => {
+                  sfx.click()
+                  setResume('done')
+                }}
+                className="flex-1 rounded-2xl bg-[#58cc02] py-3 font-black text-white shadow-[0_4px_0_#46a302]"
+              >
+                继续学习 ▶
               </button>
             </div>
           </div>
@@ -247,7 +416,7 @@ export default function Lesson() {
         <>
           <main className="mx-auto w-full max-w-2xl flex-1 px-4 pb-40 pt-2">
             <p className="mb-6 text-center text-lg font-black text-slate-500">
-              第 {qIndex + 1} 题 · {unit.icon} {unit.title}
+              {isBoss ? `👑 单元测验 · ${unit.icon} ${unit.title}` : `第 ${qIndex + 1} 题 · ${unit.icon} ${unit.title}`}
             </p>
             <h2 className="mb-6 text-center text-2xl font-black text-slate-800">{q.prompt}</h2>
 
@@ -352,6 +521,7 @@ export default function Lesson() {
                     )
                   })}
                 </div>
+                {!answered && !letterHintUsed && hintControl('letter', '显示第一个字母', HINT_LETTER_PRICE)}
               </div>
             )}
 
@@ -423,16 +593,20 @@ export default function Lesson() {
 
             {/* 选项 */}
             {q.options.length > 0 && (
-              <div className={`grid gap-3 ${q.optionKind === 'emoji' ? 'grid-cols-2' : 'grid-cols-2'}`}>
-                {q.options.map((opt) => {
-                  let st: 'idle' | 'selected' | 'correct' | 'wrong' | 'dim' = 'idle'
-                  if (answered) {
-                    if (opt === q.correct) st = 'correct'
-                    else if (opt === selected) st = 'wrong'
-                    else st = 'dim'
-                  } else if (opt === selected) {
-                    st = 'selected'
-                  }
+              <>
+                {!answered && q.options.length >= 4 && eliminated.length === 0 && hintControl('fifty', '去掉两个错误选项', HINT_FIFTY_PRICE)}
+                <div className={`grid gap-3 ${q.optionKind === 'emoji' ? 'grid-cols-2' : 'grid-cols-2'}`}>
+                  {q.options.map((opt) => {
+                    let st: 'idle' | 'selected' | 'correct' | 'wrong' | 'dim' = 'idle'
+                    if (answered) {
+                      if (opt === q.correct) st = 'correct'
+                      else if (opt === selected) st = 'wrong'
+                      else st = 'dim'
+                    } else if (eliminated.includes(opt)) {
+                      st = 'dim'
+                    } else if (opt === selected) {
+                      st = 'selected'
+                    }
                   return (
                     <OptionButton
                       key={opt}
@@ -446,8 +620,9 @@ export default function Lesson() {
                       }}
                     />
                   )
-                })}
-              </div>
+                  })}
+                </div>
+              </>
             )}
           </main>
 
@@ -530,6 +705,18 @@ export default function Lesson() {
           <div className="mb-4 text-8xl">💔</div>
           <h2 className="mb-2 text-3xl font-black text-slate-800">爱心用完了</h2>
           <p className="mb-8 font-bold text-slate-400">别灰心，休息一会儿再挑战！</p>
+          {saveState.gems >= HEART_REFILL_PRICE ? (
+            <button
+              onClick={refillHearts}
+              className="mb-3 w-full rounded-2xl bg-[#ffc800] py-4 text-lg font-black text-white shadow-[0_4px_0_#e0a500] transition hover:brightness-105"
+            >
+              花 {HEART_REFILL_PRICE} 宝石补满爱心，继续闯关 💎
+            </button>
+          ) : (
+            <p className="mb-3 text-sm font-bold text-slate-300">
+              宝石不够补爱心（需要 {HEART_REFILL_PRICE}，你有 {saveState.gems}）
+            </p>
+          )}
           <button
             onClick={restart}
             className="mb-3 w-full rounded-2xl bg-[#58cc02] py-4 text-lg font-black text-white shadow-[0_4px_0_#46a302]"

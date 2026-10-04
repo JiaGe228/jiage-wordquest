@@ -21,6 +21,8 @@ export interface SaveState {
   xpToday: number
   completed: Record<string, boolean> // `${unitId}-L${i}`
   wordProgress: Record<string, WordProgress>
+  outfit: string // 当前穿戴的装扮 id，空为无
+  ownedOutfits: string[] // 已拥有的装扮 id
 }
 
 const STORAGE_KEY = 'wordquest-save-v1'
@@ -54,6 +56,8 @@ export const DEFAULT_STATE: SaveState = {
   xpToday: 0,
   completed: {},
   wordProgress: {},
+  outfit: '',
+  ownedOutfits: [],
 }
 
 function loadState(): SaveState {
@@ -91,7 +95,7 @@ export function xpLevel(xp: number) {
 interface GameContextValue {
   state: SaveState
   setName: (name: string) => void
-  completeLesson: (levelKey: string, results: LevelResult[]) => { xpEarned: number; gemsEarned: number; correct: number; total: number }
+  completeLesson: (levelKey: string, results: LevelResult[], gemBonus?: number) => { xpEarned: number; gemsEarned: number; correct: number; total: number }
   recordReview: (wordId: string, known: boolean) => number // 返回获得 xp
   isLevelDone: (levelKey: string) => boolean
   dueWords: string[] // 今天到期待复习的 wordId
@@ -99,6 +103,9 @@ interface GameContextValue {
   masteredCount: number // mastery >= 3
   totalXpToday: number
   resetAll: () => void
+  spendGems: (n: number) => boolean // 扣宝石，不够返回 false
+  buyOutfit: (id: string, price: number) => boolean // 买并自动穿上
+  equipOutfit: (id: string) => void // 穿/脱（再点一次脱下）
 }
 
 const GameContext = createContext<GameContextValue | null>(null)
@@ -133,12 +140,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
       state,
       setName: (name) => setState((s) => ({ ...s, name })),
 
-      completeLesson: (levelKey, results) => {
+      completeLesson: (levelKey, results, gemBonus = 1) => {
         const correct = results.filter((r) => r.correct).length
         const total = results.length
         const perfect = correct === total
         const xpEarned = correct * 10 + (perfect ? 15 : 0)
-        const gemsEarned = 5 + correct * 2
+        const gemsEarned = (5 + correct * 2) * gemBonus
         const t = todayStr()
 
         setState((s) => {
@@ -205,6 +212,25 @@ export function GameProvider({ children }: { children: ReactNode }) {
       totalXpToday: state.today === todayStr() ? state.xpToday : 0,
 
       resetAll: () => setState({ ...DEFAULT_STATE, today: todayStr() }),
+
+      spendGems: (n) => {
+        if (state.gems < n) return false
+        setState((s) => (s.gems < n ? s : { ...s, gems: s.gems - n }))
+        return true
+      },
+
+      buyOutfit: (id, price) => {
+        if (state.ownedOutfits.includes(id) || state.gems < price) return false
+        setState((s) =>
+          s.ownedOutfits.includes(id) || s.gems < price
+            ? s
+            : { ...s, gems: s.gems - price, ownedOutfits: [...s.ownedOutfits, id], outfit: id }
+        )
+        return true
+      },
+
+      equipOutfit: (id) =>
+        setState((s) => ({ ...s, outfit: s.outfit === id ? '' : id })),
     }
   }, [state])
 

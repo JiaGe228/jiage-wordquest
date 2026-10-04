@@ -1,5 +1,5 @@
 import type { Question, QType, Word } from '@/types/game'
-import { UNITS, QUESTIONS_PER_LEVEL, WORDS_PER_LEVEL } from '@/data/words'
+import { UNITS, LEVELS_PER_UNIT, QUESTIONS_PER_LEVEL, WORDS_PER_LEVEL } from '@/data/words'
 
 // 伪随机数（按关卡种子固定，保证每次进入同一关题目一致）
 export function mulberry32(seed: number) {
@@ -34,7 +34,7 @@ function pickDistractors<T>(pool: T[], target: T, n: number, rng: () => number):
   return others.slice(0, n)
 }
 
-/** 生成某一关的题目列表 */
+/** 生成某一关的题目列表；每单元最后一关为 Boss 测验（全单元 12 词混合，10 题） */
 export function generateQuestions(unitId: string, levelIndex: number): Question[] {
   const unit = UNITS.find((u) => u.id === unitId)
   if (!unit) return []
@@ -45,10 +45,25 @@ export function generateQuestions(unitId: string, levelIndex: number): Question[
   const allMeanings = allWords.map((w) => w.meaning)
   const allSpellings = allWords.map((w) => w.word)
   const allEmojis = allWords.map((w) => w.emoji)
-
-  // 关卡难度递进：越往后拼写/翻译占比越高
-  // 「闯天下」主题单元（单词带小知识）穿插知识卡
+  const ctx = { unitWords, allMeanings, allSpellings, allEmojis, rng, idx: 0 }
   const isWorldUnit = Boolean(unit.words[0]?.fact)
+
+  // Boss 关：10 题，覆盖全单元 12 个单词
+  if (levelIndex >= LEVELS_PER_UNIT - 1) {
+    const bossWords = shuffle(unit.words, rng)
+    const bossPlan: QType[] = isWorldUnit
+      ? ['image-pick-zh', 'speak', 'fact', 'translate-en', 'spelling', 'listen', 'fill-blank', 'speak', 'fact', 'spelling']
+      : ['image-pick-zh', 'speak', 'translate-en', 'spelling', 'listen', 'image-pick-en', 'fill-blank', 'speak', 'spelling', 'translate-en']
+    const questions: Question[] = []
+    for (let i = 0; i < bossPlan.length; i++) {
+      const type = bossPlan[i]!
+      const word = type === 'fact' ? bossWords[(i * 2 + 1) % bossWords.length]! : bossWords[i % bossWords.length]!
+      questions.push(buildQuestion(type, word, { ...ctx, idx: i }))
+    }
+    return questions
+  }
+
+  // 普通关：关卡难度递进，越往后拼写/翻译占比越高；世界主题单元穿插知识卡
   const typePlans: QType[][] = isWorldUnit
     ? [
         ['image-pick-zh', 'speak', 'fact', 'translate-en', 'spelling', 'fact'],
@@ -66,7 +81,7 @@ export function generateQuestions(unitId: string, levelIndex: number): Question[
   for (let i = 0; i < Math.min(QUESTIONS_PER_LEVEL, plan.length); i++) {
     const type = plan[i]
     const word = type === 'fact' ? levelWords[(i * 2 + 1) % levelWords.length] : levelWords[i % levelWords.length]
-    questions.push(buildQuestion(type, word, { unitWords, allMeanings, allSpellings, allEmojis, rng, idx: i }))
+    questions.push(buildQuestion(type, word, { ...ctx, idx: i }))
   }
   return questions
 }

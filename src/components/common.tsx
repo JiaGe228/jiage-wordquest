@@ -86,11 +86,18 @@ export function Confetti() {
   )
 }
 
-/** 猫头鹰吉祥物提示气泡 */
-export function MascotHint({ text }: { text: string }) {
+/** 猫头鹰吉祥物提示气泡（outfit 为已穿装扮 emoji，空为无） */
+export function MascotHint({ text, outfit = '' }: { text: string; outfit?: string }) {
   return (
     <div className="flex items-center gap-3 rounded-2xl border-2 border-[#e5e5e5] bg-white p-3 shadow-sm">
-      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#fff4d6] text-3xl">🦉</div>
+      <div className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#fff4d6] text-3xl">
+        🦉
+        {outfit && (
+          <span className="absolute -right-2 -top-2 text-xl" aria-label="当前装扮">
+            {outfit}
+          </span>
+        )}
+      </div>
       <p className="text-sm font-bold text-slate-600">{text}</p>
     </div>
   )
